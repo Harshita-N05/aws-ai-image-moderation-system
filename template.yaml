@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AWS AI Image Moderation System
+  Serverless pipeline: S3 → Lambda → Rekognition → SNS → API Gateway
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: python3.11
+    Environment:
+      Variables:
+        REGION:           !Ref AWS::Region
+        CONFIDENCE_THRESHOLD: "75.0"
+        SNS_TOPIC_ARN:        !Ref ModerationAlertTopic
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Default: "harshitan05@gmail.com"
+    Description: Email address to receive moderation alerts
+
+Resources:
+
+  # ── S3 Bucket ──────────────────────────────────────────────────────────────
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "image-moderation-${AWS::AccountId}"  
+            
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, PUT, POST]
+            AllowedOrigins: ["*"]
+
+  # ── Lambda Permission for S3 ───────────────────────────────────────────────
+  
+
+  # ── Lambda Function ────────────────────────────────────────────────────────
+  ModerationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ImageModerationHandler
+      CodeUri: src/
+      Handler: lambda_handler.lambda_handler
+      Description: "Detects unsafe content using AWS Rekognition"
+      Policies:
+        - AmazonRekognitionReadOnlyAccess
+        - AmazonSNSFullAccess
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObjectTagging
+              Resource: !Sub "arn:aws:s3:::image-moderation-${AWS::AccountId}/*"
+      Events:
+        ApiPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ModerationApi
+            Path: /moderate
+            Method: POST
+        ApiGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ModerationApi
+            Path: /health
+            Method: GET
+        S3Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref ImageBucket
+            Events: s3:ObjectCreated:*
+
+  # ── API Gateway ────────────────────────────────────────────────────────────
+  ModerationApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: ImageModerationAPI
+      StageName: prod
+      Cors:
+        AllowMethods: "'POST, GET, OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization'"
+        AllowOrigin: "'*'"
+
+  # ── SNS Topic ──────────────────────────────────────────────────────────────
+  ModerationAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ImageModerationAlerts
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  # ── CloudWatch Log Group ───────────────────────────────────────────────────
+  ModerationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/ImageModerationHandler"
+      RetentionInDays: 14
+
+Outputs:
+  ApiEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${ModerationApi}.execute-api.${AWS::Region}.amazonaws.com/prod/moderate"
+
+  ImageBucketName:
+    Description: "S3 bucket for image uploads"
+    Value: !Ref ImageBucket
+
+  LambdaFunctionArn:
+    Description: "Lambda function ARN"
+    Value: !GetAtt ModerationFunction.Arn
+
+  SNSTopicArn:
+    Description: "SNS topic ARN for alerts"
+    Value: !Ref ModerationAlertTopic
